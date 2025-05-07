@@ -24,14 +24,15 @@ from collections import defaultdict
 import io
 
 # --- Application Configuration ---
-APP_TITLE = "Tebra Charge Entry"
+APP_TITLE = "🤖 Tebra Charge Entry"
 APP_SUBTITLE = "By Panacea Smart Solutions"
 APP_FOOTER = "Tebra Charge Entry Tool © 2025 | Panacea Smart Solutions | Developed by Saqib Sherwani"
 TEBRA_PRACTICE_NAME = "Pediatrics West" # Hardcoded Practice Name
 TEBRA_WSDL_URL = "https://webservice.kareo.com/services/soap/2.1/KareoServices.svc?singleWsdl"
 
 # --- SET PAGE CONFIG MUST BE THE FIRST STREAMLIT COMMAND ---
-st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
+# Add page_icon
+st.set_page_config(page_title=APP_TITLE, page_icon="🤖", layout="wide", initial_sidebar_state="expanded")
 
 # --- Expected Excel Columns ---
 EXPECTED_COLUMNS = [
@@ -56,32 +57,105 @@ POS_CODE_MAP = {
 
 # --- Streamlit UI Styling ---
 def apply_custom_styling():
-    # Enhanced Styling
+    # Enhanced Styling - Adjusted for better theme compatibility
     st.markdown("""
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap');
-        html, body, [class*="st-"] { font-family: 'Open Sans', sans-serif; }
-        .stApp { background: linear-gradient(to bottom right, #e0f2f7, #ffffff); }
-        .main-header { font-size: 38px; font-weight: 700; color: #005A9C; text-align: center; padding-top: 25px; margin-bottom: 8px; text-shadow: 1px 1px 2px #ccc; }
-        .sub-header { font-size: 22px; font-weight: 600; color: #5A7D9A; text-align: center; margin-bottom: 45px; }
-        .footer { position: fixed; left: 0; bottom: 0; width: 100%; background-color: #004A7C; color: #E0F2F7; text-align: center; padding: 12px; font-size: 14px; z-index: 1000; }
-        .stButton>button { border: none; border-radius: 8px; padding: 12px 24px; font-weight: 600; background-color: #007bff; color: white; transition: background-color 0.3s ease; cursor: pointer; }
-        .stButton>button:hover { background-color: #0056b3; }
-        .stTextInput input, .stFileUploader label, .stTextArea textarea { border-radius: 8px; border: 1px solid #ced4da; }
-        .stFileUploader>div>div>button { background-color: #6c757d; color:white; } /* Style file uploader browse button */
-        .stFileUploader>div>div>button:hover { background-color: #5a6268; color:white; }
-        .stFileUploader label { border: 2px dashed #007bff; padding: 20px; background-color: #f8f9fa; }
-        .message-box { border-left-width: 6px; padding: 15px; margin-bottom: 15px; border-radius: 8px; font-size: 15px; box-shadow: 2px 2px 5px #eee; }
-        .info-message { border-left-color: #17a2b8; background-color: #e8f7fa; }
-        .success-message { border-left-color: #28a745; background-color: #eaf6ec; }
-        .error-message { border-left-color: #dc3545; background-color: #fdefee; }
-        .warning-message { border-left-color: #ffc107; background-color: #fff8e1; }
-        [data-testid="stSidebar"] { background-color: #e9ecef; padding: 15px; border-right: 1px solid #dee2e6; }
-        [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 { color: #004A7C; font-weight: 600;}
+
+        html, body, [class*="st-"] {
+            font-family: 'Open Sans', sans-serif;
+        }
+
+        /* Remove custom background to allow Streamlit themes */
+        /* .stApp { background: linear-gradient(to bottom right, #e0f2f7, #ffffff); } */
+
+        /* Styles for Title and Subtitle will be handled by st.title/st.subheader */
+
+        .footer {
+            position: fixed;
+            left: 0;
+            bottom: 0;
+            width: 100%;
+            background-color: #004A7C; /* Dark Blue */
+            color: #E0F2F7; /* Light text */
+            text-align: center;
+            padding: 10px; /* Reduced padding slightly */
+            font-size: 13px; /* Slightly smaller footer */
+            z-index: 1000;
+        }
+        .stButton>button {
+            border: none;
+            border-radius: 8px;
+            padding: 10px 20px; /* Adjusted padding */
+            font-weight: 600;
+            background-color: #007bff; /* Primary Blue */
+            color: white;
+            transition: background-color 0.3s ease;
+            cursor: pointer;
+        }
+        .stButton>button:hover {
+            background-color: #0056b3; /* Darker blue on hover */
+        }
+        /* Keep input styling */
+        .stTextInput input, .stFileUploader label, .stTextArea textarea {
+            border-radius: 8px;
+            border: 1px solid #ced4da;
+        }
+         .stFileUploader label {
+             border: 2px dashed #007bff;
+             padding: 20px;
+             /* Use Streamlit's secondary background for better theme compatibility */
+             background-color: var(--secondary-background-color);
+        }
+         /* Style file uploader browse button */
+        .stFileUploader>div>div>button {
+            background-color: #6c757d;
+            color:white;
+        }
+        .stFileUploader>div>div>button:hover {
+            background-color: #5a6268;
+            color:white;
+         }
+
+        /* Custom Message Boxes - using CSS variables for better theme support */
+        .message-box {
+            border-left-width: 5px;
+            padding: 12px;
+            margin-bottom: 15px;
+            border-radius: 6px;
+            font-size: 14px;
+            box-shadow: 1px 1px 3px rgba(0,0,0,0.1);
+            /* Use Streamlit theme colors where possible */
+            color: var(--text-color);
+        }
+        .info-message { border-left-color: #17a2b8; background-color: var(--secondary-background-color); }
+        .success-message { border-left-color: #28a745; background-color: var(--secondary-background-color); }
+        .error-message { border-left-color: #dc3545; background-color: var(--secondary-background-color); }
+        .warning-message { border-left-color: #ffc107; background-color: var(--secondary-background-color); }
+
+        /* Sidebar Styling */
+        [data-testid="stSidebar"] {
+             background-color: #f0f2f6; /* Light gray sidebar */
+             border-right: 1px solid #dee2e6;
+        }
+         /* Ensure sidebar background works in dark mode */
+        [data-theme="dark"] [data-testid="stSidebar"] {
+             background-color: #262730; /* Standard Streamlit dark sidebar color */
+             border-right: 1px solid #31333F;
+        }
+        [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
+             color: #004A7C; /* Dark blue headers in sidebar */
+             font-weight: 600;
+        }
+         /* Dark mode sidebar headers */
+         [data-theme="dark"] [data-testid="stSidebar"] h1,
+         [data-theme="dark"] [data-testid="stSidebar"] h2,
+         [data-theme="dark"] [data-testid="stSidebar"] h3 {
+              color: #e1e1e1; /* Light color for dark mode */
+         }
         </style>
     """, unsafe_allow_html=True)
-    st.markdown(f'<p class="main-header">{APP_TITLE}</p>', unsafe_allow_html=True)
-    st.markdown(f'<p class="sub-header">{APP_SUBTITLE}</p>', unsafe_allow_html=True)
+    # Title/Subtitle are now handled directly in main()
 
 def display_message(type, message):
     # Simple wrapper for styled messages
@@ -538,9 +612,17 @@ def process_excel_data(client_obj, header_obj, current_practice_id, df_excel_dat
     return processed_rows_data
 
 # --- Streamlit Application UI ---
+# --- Streamlit Application UI ---
 def main():
-    apply_custom_styling() # Apply custom CSS
+    apply_custom_styling() # Apply custom CSS first
+
+    # --- Display Title and Subtitle using Streamlit functions ---
+    st.title("🤖 Tebra Charge Entry Tool") # Added Icon, uses standard title styling now
+    st.subheader("By Panacea Smart Solutions") # Uses standard subheader styling
+
+    # --- Credentials and File Upload (Sidebar) ---
     st.sidebar.header("Tebra Credentials")
+    
     # Unique keys for all sidebar widgets
     customer_key_val = st.sidebar.text_input("Customer Key", type="password", key="sb_customer_key")
     user_email_val = st.sidebar.text_input("Username (email)", key="sb_user_email")
