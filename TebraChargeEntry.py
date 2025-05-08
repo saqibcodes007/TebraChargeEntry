@@ -55,9 +55,7 @@ POS_CODE_MAP = {
     "TELEHEALTH OFFICE": {"code": "02", "name": "Telehealth Provided Other than in Patient’s Home"},
 }
 
-# --- Streamlit UI Styling ---
 def apply_custom_styling():
-    # Enhanced Styling - Adjusted for better theme compatibility
     st.markdown("""
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap');
@@ -66,10 +64,7 @@ def apply_custom_styling():
             font-family: 'Open Sans', sans-serif;
         }
 
-        /* Remove custom background to allow Streamlit themes */
         /* .stApp { background: linear-gradient(to bottom right, #e0f2f7, #ffffff); } */
-
-        /* Styles for Title and Subtitle will be handled by st.title/st.subheader */
 
         .footer {
             position: fixed;
@@ -79,14 +74,14 @@ def apply_custom_styling():
             background-color: #004A7C; /* Dark Blue */
             color: #E0F2F7; /* Light text */
             text-align: center;
-            padding: 10px; /* Reduced padding slightly */
-            font-size: 13px; /* Slightly smaller footer */
+            padding: 10px;
+            font-size: 13px;
             z-index: 1000;
         }
         .stButton>button {
             border: none;
             border-radius: 8px;
-            padding: 10px 20px; /* Adjusted padding */
+            padding: 10px 20px;
             font-weight: 600;
             background-color: #007bff; /* Primary Blue */
             color: white;
@@ -96,28 +91,24 @@ def apply_custom_styling():
         .stButton>button:hover {
             background-color: #0056b3; /* Darker blue on hover */
         }
-        /* Keep input styling */
         .stTextInput input, .stFileUploader label, .stTextArea textarea {
             border-radius: 8px;
             border: 1px solid #ced4da;
         }
-         .stFileUploader label {
-             border: 2px dashed #007bff;
-             padding: 20px;
-             /* Use Streamlit's secondary background for better theme compatibility */
-             background-color: var(--secondary-background-color);
+        .stFileUploader label {
+            border: 2px dashed #007bff;
+            padding: 20px;
+            background-color: var(--secondary-background-color);
         }
-         /* Style file uploader browse button */
-        .stFileUploader>div>div>button {
+        .stFileUploader>div>div>button { /* Browse button */
             background-color: #6c757d;
             color:white;
         }
         .stFileUploader>div>div>button:hover {
             background-color: #5a6268;
             color:white;
-         }
+        }
 
-        /* Custom Message Boxes - using CSS variables for better theme support */
         .message-box {
             border-left-width: 5px;
             padding: 12px;
@@ -125,7 +116,6 @@ def apply_custom_styling():
             border-radius: 6px;
             font-size: 14px;
             box-shadow: 1px 1px 3px rgba(0,0,0,0.1);
-            /* Use Streamlit theme colors where possible */
             color: var(--text-color);
         }
         .info-message { border-left-color: #17a2b8; background-color: var(--secondary-background-color); }
@@ -135,27 +125,76 @@ def apply_custom_styling():
 
         /* Sidebar Styling */
         [data-testid="stSidebar"] {
-             background-color: #f0f2f6; /* Light gray sidebar */
-             border-right: 1px solid #dee2e6;
+            background-color: #f0f2f6; /* Light gray sidebar for light theme */
+            border-right: 1px solid #dee2e6;
         }
-         /* Ensure sidebar background works in dark mode */
         [data-theme="dark"] [data-testid="stSidebar"] {
-             background-color: #262730; /* Standard Streamlit dark sidebar color */
-             border-right: 1px solid #31333F;
+            background-color: #262730 !important; /* Standard Streamlit dark sidebar color */
+            border-right: 1px solid #31333F !important;
         }
         [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
-             color: #004A7C; /* Dark blue headers in sidebar */
-             font-weight: 600;
+            color: #004A7C; /* Dark blue headers in sidebar for light theme */
+            font-weight: 600;
         }
-         /* Dark mode sidebar headers */
-         [data-theme="dark"] [data-testid="stSidebar"] h1,
-         [data-theme="dark"] [data-testid="stSidebar"] h2,
-         [data-theme="dark"] [data-testid="stSidebar"] h3 {
-              color: #e1e1e1; /* Light color for dark mode */
-         }
+        [data-theme="dark"] [data-testid="stSidebar"] h1,
+        [data-theme="dark"] [data-testid="stSidebar"] h2,
+        [data-theme="dark"] [data-testid="stSidebar"] h3 {
+            color: #e1e1e1 !important; /* Light color for dark mode headers */
+        }
+
+        /* ======= FIXES FOR DARK THEME SIDEBAR ISSUES ======= */
+
+        /* Text Inputs in DARK THEME SIDEBAR */
+        [data-theme="dark"] [data-testid="stSidebar"] .stTextInput input {
+            background-color: #FFFFFF !important; /* Force a white background for the input field */
+            color: #000000 !important;           /* Force black text color for typed content */
+            border: 1px solid #B0B0B0 !important; /* A visible light grey border for the white input */
+        }
+
+        [data-theme="dark"] [data-testid="stSidebar"] .stTextInput input::placeholder {
+            color: #555555 !important;           /* Dark grey placeholder text for visibility on white background */
+        }
+
+        /* Ensure labels for text inputs in dark theme sidebar remain visible against the dark sidebar background */
+        /* (Streamlit default should handle this, but can be explicit if needed) */
+        [data-theme="dark"] [data-testid="stSidebar"] .stTextInput label {
+            color: #e1e1e1 !important; /* Light color for label on dark sidebar background */
+        }
+
+        /* File Uploader - File Name and Row in DARK THEME SIDEBAR */
+        /* This targets the row where the file is listed (name, size, delete icon) */
+        [data-theme="dark"] [data-testid="stSidebar"] div[data-testid="stFileUploaderFile"] {
+            background-color: #FFFFFF !important; /* Force a white background for the file row */
+            border-radius: 4px !important;
+            padding: 5px 8px !important; /* Adjust padding as needed */
+            margin-bottom: 5px !important; /* Space between file items */
+        }
+
+        /* This targets all text content (like file name, file size) within that row */
+        [data-theme="dark"] [data-testid="stSidebar"] div[data-testid="stFileUploaderFile"] *,
+        [data-theme="dark"] [data-testid="stSidebar"] div[data-testid="stFileUploaderFile"] button svg { /* Target text and icons */
+            color: #000000 !important; /* Force black color for all text and icons within the file row */
+            fill: #000000 !important;  /* For SVG icons like the delete 'x' */
+        }
+        
+        /* Ensure the "Browse files" button text and "Drag and drop" text on file uploader are okay in dark mode sidebar */
+        [data-theme="dark"] [data-testid="stSidebar"] .stFileUploader label {
+            background-color: var(--secondary-background-color) !important; /* Should be a dark color from theme */
+            border: 2px dashed #007bff !important;
+            color: #e1e1e1 !important; /* Light text for the "Drag and drop" area */
+        }
+        [data-theme="dark"] [data-testid="stSidebar"] .stFileUploader>div>div>button { /* Browse files button */
+             background-color: #6c757d !important;
+             color: white !important;
+        }
+        [data-theme="dark"] [data-testid="stSidebar"] .stFileUploader>div>div>button:hover {
+             background-color: #5a6268 !important;
+             color: white !important;
+        }
+        /* ====================================================== */
+
         </style>
     """, unsafe_allow_html=True)
-    # Title/Subtitle are now handled directly in main()
 
 def display_message(type, message):
     # Simple wrapper for styled messages
