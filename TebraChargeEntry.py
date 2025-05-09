@@ -38,13 +38,13 @@ st.set_page_config(page_title=APP_TITLE, page_icon="🤖", layout="wide", initia
 EXPECTED_COLUMNS = [
     'Patient ID', 'From Date', 'Through Date', 'Rendering Provider', 'Location',
     'Place of Service', 'Encounter Mode', 'Procedures', 'Mod 1', 'Mod 2',
-    'Units', 'UnitCharge', 'Diag 1', 'Diag 2', 'Diag 3', 'Diag 4'
+    'Units', 'Diag 1', 'Diag 2', 'Diag 3', 'Diag 4' # Removed 'UnitCharge'
 ]
 # Define column name constants for consistency
 COL_PATIENT_ID = 'Patient ID'; COL_FROM_DATE = 'From Date'; COL_THROUGH_DATE = 'Through Date'
 COL_RENDERING_PROVIDER = 'Rendering Provider'; COL_LOCATION = 'Location'; COL_PLACE_OF_SERVICE_EXCEL = 'Place of Service'
 COL_ENCOUNTER_MODE = 'Encounter Mode'; COL_PROCEDURES = 'Procedures'; COL_MOD1 = 'Mod 1'; COL_MOD2 = 'Mod 2'
-COL_UNITS = 'Units'; COL_UNIT_CHARGE = 'UnitCharge'; COL_DIAG1 = 'Diag 1'; COL_DIAG2 = 'Diag 2'
+COL_UNITS = 'Units'; COL_DIAG1 = 'Diag 1'; COL_DIAG2 = 'Diag 2' # Removed COL_UNIT_CHARGE
 COL_DIAG3 = 'Diag 3'; COL_DIAG4 = 'Diag 4'
 
 # --- Place of Service Mapping ---
@@ -490,16 +490,13 @@ def create_service_line_payload(client_obj, sld, start_dt, end_dt):
     if not pc or u is None or pd.isna(u) or not d1: return None
     try: uf = float(u)
     except ValueError: return None
-    uc_val = sld.get(COL_UNIT_CHARGE); ucf = None
-    if uc_val is not None and pd.notna(uc_val) and str(uc_val).strip().lower() not in ['none', 'nan', '']:
-        try: ucf = float(str(uc_val))
-        except ValueError: pass
+    # UnitCharge logic has been removed here
     m1, m2 = (str(sld.get(c) if pd.notna(sld.get(c)) else "").strip() or None for c in [COL_MOD1, COL_MOD2])
     def cdiag(v): s = str(v).strip(); return s if pd.notna(v) and s and s.lower() != 'nan' else None
     args = {'ProcedureCode': pc, 'Units': uf, 'ServiceStartDate': str(start_dt), 'ServiceEndDate': str(end_dt), 'DiagnosisCode1': d1,
             'ProcedureModifier1': m1, 'ProcedureModifier2': m2,
             'DiagnosisCode2': cdiag(sld.get(COL_DIAG2)), 'DiagnosisCode3': cdiag(sld.get(COL_DIAG3)), 'DiagnosisCode4': cdiag(sld.get(COL_DIAG4))}
-    if ucf is not None: args['UnitCharge'] = ucf
+    # The 'if ucf is not None: args['UnitCharge'] = ucf' line has been removed
     try: return slt(**args)
     except Exception as e: display_message("error", f"SvcLine Payload Error: {e}"); return None
 
