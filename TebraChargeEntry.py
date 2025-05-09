@@ -36,16 +36,17 @@ st.set_page_config(page_title=APP_TITLE, page_icon="🤖", layout="wide", initia
 
 # --- Expected Excel Columns ---
 EXPECTED_COLUMNS = [
-    'Patient ID', 'From Date', 'Through Date', 'Rendering Provider', 'Location',
-    'Place of Service', 'Encounter Mode', 'Procedures', 'Mod 1', 'Mod 2',
-    'Units', 'Diag 1', 'Diag 2', 'Diag 3', 'Diag 4' # Removed 'UnitCharge'
+    'Patient ID', 'From Date', 'Through Date', 'Rendering Provider', 'Scheduling Provider', # Added Scheduling Provider
+    'Location', 'Place of Service', 'Encounter Mode', 'Procedures', 'Mod 1', 'Mod 2',
+    'Units', 'Diag 1', 'Diag 2', 'Diag 3', 'Diag 4', 'Batch Number' # Added Batch Number
 ]
 # Define column name constants for consistency
 COL_PATIENT_ID = 'Patient ID'; COL_FROM_DATE = 'From Date'; COL_THROUGH_DATE = 'Through Date'
-COL_RENDERING_PROVIDER = 'Rendering Provider'; COL_LOCATION = 'Location'; COL_PLACE_OF_SERVICE_EXCEL = 'Place of Service'
+COL_RENDERING_PROVIDER = 'Rendering Provider'; COL_SCHEDULING_PROVIDER = 'Scheduling Provider' # Added
+COL_LOCATION = 'Location'; COL_PLACE_OF_SERVICE_EXCEL = 'Place of Service'
 COL_ENCOUNTER_MODE = 'Encounter Mode'; COL_PROCEDURES = 'Procedures'; COL_MOD1 = 'Mod 1'; COL_MOD2 = 'Mod 2'
-COL_UNITS = 'Units'; COL_DIAG1 = 'Diag 1'; COL_DIAG2 = 'Diag 2' # Removed COL_UNIT_CHARGE
-COL_DIAG3 = 'Diag 3'; COL_DIAG4 = 'Diag 4'
+COL_UNITS = 'Units'; COL_DIAG1 = 'Diag 1'; COL_DIAG2 = 'Diag 2'
+COL_DIAG3 = 'Diag 3'; COL_DIAG4 = 'Diag 4'; COL_BATCH_NUMBER = 'Batch Number' # Added
 
 # --- Place of Service Mapping ---
 POS_CODE_MAP = {
@@ -575,6 +576,26 @@ def process_excel_data(client_obj, header_obj, current_practice_id, df_excel_dat
             loc_id = get_location_id_by_name(client_obj, header_obj, current_practice_id, loc_name)
             if not loc_id: raise ValueError(f"Location ID not found for '{loc_name}'.")
 
+            # Resolve Scheduling Provider ID (Optional)
+            sch_p_name = str(enc_src.get(COL_SCHEDULING_PROVIDER, "")).strip()
+            sch_p_pyld = None
+            if sch_p_name:
+                log_ph.info(f"Grp {grp_key}: Looking up Scheduling Provider '{sch_p_name}'...")
+                sch_p_id = get_provider_id_by_name(client_obj, header_obj, current_practice_id, sch_p_name)
+                if not sch_p_id:
+                    # If Scheduling Provider name is given but ID not found, log a warning.
+                    # The charge can still be created without it if it's optional in Tebra.
+                    display_message("warning", f"Grp {grp_key}: Active Scheduling Provider ID NOT FOUND for '{sch_p_name}'. Encounter will be created without it.")
+                else:
+                    sch_p_pyld = create_provider_identifier_payload(client_obj, sch_p_id)
+                    display_message("info", f"Grp {grp_key}: Scheduling Provider ID {sch_p_id} for '{sch_p_name}' found.")
+            # else: No Scheduling Provider name in Excel, so it will be omitted.
+
+            # Get Batch Number (Optional)
+            batch_num_val = str(enc_src.get(COL_BATCH_NUMBER, "")).strip()
+            if batch_num_val:
+                display_message("info", f"Grp {grp_key}: Batch Number '{batch_num_val}' will be used.")
+                
             # Format Dates
             enc_start_dt = format_datetime_for_api(enc_src.get(COL_FROM_DATE))
             enc_end_dt = format_datetime_for_api(enc_src.get(COL_THROUGH_DATE))
@@ -610,10 +631,23 @@ def process_excel_data(client_obj, header_obj, current_practice_id, df_excel_dat
 
             # Final API Call
             sl_arr_pyld = arr_sl_req_type(ServiceLineReq=all_sl_objs)
+
             enc_args = {"Patient": pt_pyld, "RenderingProvider": rp_pyld, "ServiceLocation": sloc_pyld,
-                        "PlaceOfService": pos_pyld, "ServiceStartDate": enc_start_dt, "ServiceEndDate": enc_end_dt,
-                        "ServiceLines": sl_arr_pyld, "Practice": prac_pyld, "EncounterStatus": "Draft", "Case": case_pyld_obj}
+                    "PlaceOfService": pos_pyld, "ServiceStartDate": enc_start_dt, "ServiceEndDate": enc_end_dt,
+                    "ServiceLines": sl_arr_pyld, "Practice": prac_pyld, "EncounterStatus": "Draft", "Case": case_pyld_obj}
+
+            # Add SchedulingProvider if found
+            if sch_p_pyld:
+                enc_args["SchedulingProvider"] = sch_p_pyld
+
+                # Add BatchNumber if provided
+            if batch_num_val: # Only add if a value was present in Excel
+                enc_args["BatchNumber"] = batch_num_val
+            # If Tebra API requires the BatchNumber field even if empty, you might change the above to:
+            # enc_args["BatchNumber"] = batch_num_val # This would send an empty string if batch_num_val is ""
+
             enc_pyld = enc_type(**enc_args)
+        
             final_req = create_req_type(RequestHeader=header_obj, Encounter=enc_pyld)
             log_ph.info(f"Grp {grp_key}: Calling CreateEncounter API...")
             api_resp = client_obj.service.CreateEncounter(request=final_req)
