@@ -302,7 +302,7 @@ def get_provider_id_by_name(client_obj, header_obj, practice_id, provider_name_f
             # --- Attempt 1: Exact Match API Filter ---
             # Filter by FullName and PracticeID - Active is NOT a valid filter argument here
             exact_filter = provider_filter_type(FullName=provider_name_search, PracticeID=str(practice_id))
-            display_message("info", f"Attempting exact match for '{provider_name_search}'...")
+            #display_message("info", f"Attempting exact match for '{provider_name_search}'...")
             resp_exact = client_obj.service.GetProviders(request=get_providers_req_type(RequestHeader=header_obj, Filter=exact_filter, Fields=fields))
 
             # Check exact match response
@@ -320,13 +320,13 @@ def get_provider_id_by_name(client_obj, header_obj, practice_id, provider_name_f
                     # Check name match and if active
                     if is_active and p_data.FullName and p_data.FullName.strip().lower() == provider_name_search.lower() and p_data.ID:
                         provider_id_found = int(p_data.ID)
-                        display_message("success", f"Found Active Provider (Exact Match): ID {provider_id_found} for '{provider_name_search}'.")
+                        #display_message("success", f"Found Active Provider (Exact Match): ID {provider_id_found} for '{provider_name_search}'.")
                         st.session_state[cache_key] = provider_id_found
                         return provider_id_found # Exit function upon finding exact match
 
             # --- Attempt 2: Flexible Match via Broad Search (if exact failed) ---
             if provider_id_found is None: # Proceed only if exact match didn't find an active provider
-                display_message("info", f"Exact active match failed for '{provider_name_search}'. Trying flexible search...")
+                #display_message("info", f"Exact active match failed for '{provider_name_search}'. Trying flexible search...")
                 # Broad filter - just by PracticeID (Active/Type filters are invalid or unreliable here)
                 broad_filter = provider_filter_type(PracticeID=str(practice_id))
                 resp_all = client_obj.service.GetProviders(request=get_providers_req_type(RequestHeader=header_obj, Filter=broad_filter, Fields=fields))
@@ -374,7 +374,7 @@ def get_provider_id_by_name(client_obj, header_obj, practice_id, provider_name_f
                     # Sort by score descending
                     best = sorted(found_providers_flex, key=lambda x: x['score'], reverse=True)[0]
                     provider_id_found = best['ID']
-                    display_message("success", f"Selected Provider (Flex Match, Score: {best['score']:.0f}): ID {provider_id_found} ('{best['FullName']}') for '{provider_name_search}'.")
+                    #display_message("success", f"Selected Provider (Flex Match, Score: {best['score']:.0f}): ID {provider_id_found} ('{best['FullName']}') for '{provider_name_search}'.")
                 # else: No eligible flex match found, provider_id_found remains None
 
             # Final check if anything was found
@@ -588,13 +588,13 @@ def process_excel_data(client_obj, header_obj, current_practice_id, df_excel_dat
                     display_message("warning", f"Grp {grp_key}: Active Scheduling Provider ID NOT FOUND for '{sch_p_name}'. Encounter will be created without it.")
                 else:
                     sch_p_pyld = create_provider_identifier_payload(client_obj, sch_p_id)
-                    display_message("info", f"Grp {grp_key}: Scheduling Provider ID {sch_p_id} for '{sch_p_name}' found.")
+                    #display_message("info", f"Grp {grp_key}: Scheduling Provider ID {sch_p_id} for '{sch_p_name}' found.")
             # else: No Scheduling Provider name in Excel, so it will be omitted.
 
             # Get Batch Number (Optional)
             batch_num_val = str(enc_src.get(COL_BATCH_NUMBER, "")).strip()
-            if batch_num_val:
-                display_message("info", f"Grp {grp_key}: Batch Number '{batch_num_val}' will be used.")
+            #if batch_num_val:
+                #display_message("info", f"Grp {grp_key}: Batch Number '{batch_num_val}' will be used.")
                 
             # Format Dates
             enc_start_dt = format_datetime_for_api(enc_src.get(COL_FROM_DATE))
