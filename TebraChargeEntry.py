@@ -10,6 +10,8 @@ NOTE: Patients MUST have at least one case created in Tebra beforehand.
 This script will fail rows for patients where no existing case is found via the API.
 Includes flexible provider name matching.
 MODIFIED: To handle multiple Dates of Service for the same patient as separate encounters.
+MODIFIED: To change result column header and simplify API error messages.
+MODIFIED: To control output column order and remove 'original_excel_row_num' from final Excel.
 """
 
 import streamlit as st
@@ -20,9 +22,10 @@ from zeep.exceptions import Fault as SoapFault, TransportError, LookupError as Z
 from requests.exceptions import ConnectionError as RequestsConnectionError
 import datetime
 import time
-import re
+import re # For parsing XML errors
 from collections import defaultdict
 import io
+from xml.etree import ElementTree as ET # For more robust XML parsing
 
 # --- Application Configuration ---
 APP_TITLE = "🤖 Tebra Charge Entry"
@@ -34,13 +37,15 @@ TEBRA_WSDL_URL = "https://webservice.kareo.com/services/soap/2.1/KareoServices.s
 # --- SET PAGE CONFIG MUST BE THE FIRST STREAMLIT COMMAND ---
 st.set_page_config(page_title=APP_TITLE, page_icon="🤖", layout="wide", initial_sidebar_state="expanded")
 
-# --- Expected Excel Columns ---
+# --- Expected Excel Columns (from the original app structure) ---
+# This list defines what columns the script expects to find in the input Excel.
+# The actual processing logic will determine if a row has enough data for an encounter.
 EXPECTED_COLUMNS = [
     'Patient ID', 'From Date', 'Through Date', 'Rendering Provider', 'Scheduling Provider',
     'Location', 'Place of Service', 'Encounter Mode', 'Procedures', 'Mod 1', 'Mod 2',
     'Units', 'Diag 1', 'Diag 2', 'Diag 3', 'Diag 4', 'Batch Number'
 ]
-# Define column name constants for consistency
+# Define column name constants for consistency (matching the input Excel)
 COL_PATIENT_ID = 'Patient ID'; COL_FROM_DATE = 'From Date'; COL_THROUGH_DATE = 'Through Date'
 COL_RENDERING_PROVIDER = 'Rendering Provider'; COL_SCHEDULING_PROVIDER = 'Scheduling Provider'
 COL_LOCATION = 'Location'; COL_PLACE_OF_SERVICE_EXCEL = 'Place of Service'
@@ -48,15 +53,21 @@ COL_ENCOUNTER_MODE = 'Encounter Mode'; COL_PROCEDURES = 'Procedures'; COL_MOD1 =
 COL_UNITS = 'Units'; COL_DIAG1 = 'Diag 1'; COL_DIAG2 = 'Diag 2'
 COL_DIAG3 = 'Diag 3'; COL_DIAG4 = 'Diag 4'; COL_BATCH_NUMBER = 'Batch Number'
 
+# NEW Column name for results - MODIFIED as per user request
+COL_RESULT_MESSAGE = "Encounter ID or Reasons for Failure"
+
+
 # --- Place of Service Mapping ---
 POS_CODE_MAP = {
     "OFFICE": {"code": "11", "name": "Office"},
     "IN OFFICE": {"code": "11", "name": "Office"},
+    "INOFFICE": {"code": "11", "name": "Office"}, 
     "TELEHEALTH": {"code": "10", "name": "Telehealth Provided in Patient’s Home"},
     "TELEHEALTH OFFICE": {"code": "02", "name": "Telehealth Provided Other than in Patient’s Home"},
 }
 
 def apply_custom_styling():
+    # Styles remain the same as in TebraChargeEntry_v1.txt
     st.markdown("""
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap');
@@ -116,7 +127,9 @@ def build_request_header(credentials, client):
 def format_datetime_for_api(date_value):
     if pd.isna(date_value) or date_value is None: return None
     try: return pd.to_datetime(date_value).strftime('%Y-%m-%dT%H:%M:%S')
-    except Exception as e: st.warning(f"Date parse warning: '{date_value}'. Error: {e}. Using None."); return None
+    except Exception as e: 
+        display_message("warning", f"Date parse warning: '{date_value}'. Error: {e}. Using None.")
+        return None
 
 # --- ID Lookup Functions ---
 def get_practice_id_from_name(client_obj, header_obj, practice_name_to_find):
@@ -136,7 +149,9 @@ def get_practice_id_from_name(client_obj, header_obj, practice_name_to_find):
             if hasattr(resp, 'ErrorResponse') and resp.ErrorResponse and resp.ErrorResponse.IsError: raise Exception(f"API Error: {resp.ErrorResponse.ErrorMessage}")
             if hasattr(resp, 'SecurityResponse') and resp.SecurityResponse and not resp.SecurityResponse.Authorized: raise Exception(f"Auth Error: {resp.SecurityResponse.SecurityResult}")
             if hasattr(resp, 'Practices') and resp.Practices and hasattr(resp.Practices, 'PracticeData') and resp.Practices.PracticeData:
-                practice_obj = next((p for p in resp.Practices.PracticeData if p.PracticeName and p.PracticeName.strip().lower() == practice_name_to_find.strip().lower() and p.ID), None)
+                practices_data = resp.Practices.PracticeData
+                if not isinstance(practices_data, list): practices_data = [practices_data]
+                practice_obj = next((p for p in practices_data if hasattr(p,'PracticeName') and p.PracticeName and p.PracticeName.strip().lower() == practice_name_to_find.strip().lower() and hasattr(p,'ID') and p.ID), None)
                 if practice_obj: practice_id = int(practice_obj.ID)
                 else: display_message("warning", f"Practice '{practice_name_to_find}' name not found.")
             else: display_message("warning", f"No practices returned matching '{practice_name_to_find}'.")
@@ -167,36 +182,51 @@ def get_provider_id_by_name(client_obj, header_obj, practice_id, provider_name_f
             fields = provider_fields_type(ID=True, FullName=True, FirstName=True, LastName=True, Active=True, PracticeID=True, Type=True)
             exact_filter = provider_filter_type(FullName=provider_name_search, PracticeID=str(practice_id))
             resp_exact = client_obj.service.GetProviders(request=get_providers_req_type(RequestHeader=header_obj, Filter=exact_filter, Fields=fields))
+            
+            exact_providers_data = []
+            if hasattr(resp_exact, 'Providers') and resp_exact.Providers and hasattr(resp_exact.Providers, 'ProviderData') and resp_exact.Providers.ProviderData:
+                exact_providers_data = resp_exact.Providers.ProviderData
+                if not isinstance(exact_providers_data, list): exact_providers_data = [exact_providers_data]
+
             if not (hasattr(resp_exact, 'ErrorResponse') and resp_exact.ErrorResponse and resp_exact.ErrorResponse.IsError) and \
                not (hasattr(resp_exact, 'SecurityResponse') and resp_exact.SecurityResponse and not resp_exact.SecurityResponse.Authorized) and \
-               hasattr(resp_exact, 'Providers') and resp_exact.Providers and hasattr(resp_exact.Providers, 'ProviderData') and resp_exact.Providers.ProviderData:
-                for p_data in resp_exact.Providers.ProviderData:
+               exact_providers_data:
+                for p_data in exact_providers_data:
                     is_active = (hasattr(p_data, 'Active') and p_data.Active is not None and ((isinstance(p_data.Active, bool) and p_data.Active) or (isinstance(p_data.Active, str) and p_data.Active.lower() == 'true')))
-                    if is_active and p_data.FullName and p_data.FullName.strip().lower() == provider_name_search.lower() and p_data.ID:
+                    if is_active and hasattr(p_data,'FullName') and p_data.FullName and p_data.FullName.strip().lower() == provider_name_search.lower() and hasattr(p_data,'ID') and p_data.ID:
                         provider_id_found = int(p_data.ID)
                         st.session_state[cache_key] = provider_id_found
                         return provider_id_found
+            
             if provider_id_found is None:
                 broad_filter = provider_filter_type(PracticeID=str(practice_id))
                 resp_all = client_obj.service.GetProviders(request=get_providers_req_type(RequestHeader=header_obj, Filter=broad_filter, Fields=fields))
                 if hasattr(resp_all, 'ErrorResponse') and resp_all.ErrorResponse and resp_all.ErrorResponse.IsError: raise Exception(f"API Error Broad Provider Search: {resp_all.ErrorResponse.ErrorMessage}")
                 if hasattr(resp_all, 'SecurityResponse') and resp_all.SecurityResponse and not resp_all.SecurityResponse.Authorized: raise Exception(f"Auth Error Broad Provider Search: {resp_all.SecurityResponse.SecurityResult}")
+                
                 found_providers_flex = []
+                all_providers_data_broad = []
                 if hasattr(resp_all, 'Providers') and resp_all.Providers and hasattr(resp_all.Providers, 'ProviderData') and resp_all.Providers.ProviderData:
+                    all_providers_data_broad = resp_all.Providers.ProviderData
+                    if not isinstance(all_providers_data_broad, list): all_providers_data_broad = [all_providers_data_broad]
+
+                if all_providers_data_broad:
                     terms = [t.lower() for t in provider_name_search.replace(',', '').replace('.', '').split() if t.lower() not in ['md', 'do', 'pa', 'np'] and t]
                     if not terms: terms = [provider_name_search.lower()]
-                    for p_item in resp_all.Providers.ProviderData:
+                    for p_item in all_providers_data_broad:
                         is_active = (hasattr(p_item, 'Active') and p_item.Active is not None and ((isinstance(p_item.Active, bool) and p_item.Active) or (isinstance(p_item.Active, str) and p_item.Active.lower() == 'true')))
                         if not is_active: continue
-                        name_api = p_item.FullName.strip().lower() if p_item.FullName else ""
+                        name_api = p_item.FullName.strip().lower() if hasattr(p_item,'FullName') and p_item.FullName else ""
                         if not name_api: continue
                         score = 0
                         if name_api == provider_name_search.lower(): score = 100
-                        elif terms: score = (sum(1 for t_term in terms if t_term in name_api) / len(terms)) * 90 if len(terms) > 0 else 0 # MODIFIED: Added len(terms) > 0 check
-                        if score > 70 and p_item.ID is not None: found_providers_flex.append({"ID": int(p_item.ID), "FullName": p_item.FullName or "", "score": score})
+                        elif terms: score = (sum(1 for t_term in terms if t_term in name_api) / len(terms)) * 90 if len(terms) > 0 else 0
+                        if score > 70 and hasattr(p_item,'ID') and p_item.ID is not None: found_providers_flex.append({"ID": int(p_item.ID), "FullName": p_item.FullName or "", "score": score})
+                
                 if found_providers_flex:
                     best = sorted(found_providers_flex, key=lambda x: x['score'], reverse=True)[0]
                     provider_id_found = best['ID']
+            
             if provider_id_found is None: display_message("warning", f"Could not find suitable ACTIVE provider matching '{provider_name_search}'.")
         except SoapFault as sf: display_message("error", f"SOAP Fault GetProviders for '{provider_name_search}': {sf.message}")
         except ZeepLookupError as le: display_message("error", f"Zeep Type Error GetProviders: {le}")
@@ -213,17 +243,20 @@ def get_location_id_by_name(client_obj, header_obj, practice_id, location_name_t
     with st.spinner(f"Finding LocationID for '{location_name}'..."):
         location_id = None
         try:
-            req_type = client_obj.get_type('ns6:GetServiceLocationsReq') # Assuming ns6, adjust if needed
+            req_type = client_obj.get_type('ns6:GetServiceLocationsReq')
             filter_type = client_obj.get_type('ns6:ServiceLocationFilter')
             fields_type = client_obj.get_type('ns6:ServiceLocationFieldsToReturn')
-            fields = fields_type(ID=True, Name=True, PracticeID=True) # Active field removed
+            fields = fields_type(ID=True, Name=True, PracticeID=True)
             loc_filter = filter_type(PracticeID=str(practice_id))
             req = req_type(RequestHeader=header_obj, Filter=loc_filter, Fields=fields)
             resp = client_obj.service.GetServiceLocations(request=req)
             if hasattr(resp, 'ErrorResponse') and resp.ErrorResponse and resp.ErrorResponse.IsError: raise Exception(f"API Error: {resp.ErrorResponse.ErrorMessage}")
             if hasattr(resp, 'SecurityResponse') and resp.SecurityResponse and not resp.SecurityResponse.Authorized: raise Exception(f"Auth Error: {resp.SecurityResponse.SecurityResult}")
+            
             if hasattr(resp, 'ServiceLocations') and resp.ServiceLocations and hasattr(resp.ServiceLocations, 'ServiceLocationData') and resp.ServiceLocations.ServiceLocationData:
-                location_obj = next((loc for loc in resp.ServiceLocations.ServiceLocationData if loc.Name and loc.Name.strip().lower() == location_name.lower() and loc.ID), None)
+                locations_data = resp.ServiceLocations.ServiceLocationData
+                if not isinstance(locations_data, list): locations_data = [locations_data]
+                location_obj = next((loc for loc in locations_data if hasattr(loc, 'Name') and loc.Name and loc.Name.strip().lower() == location_name.lower() and hasattr(loc, 'ID') and loc.ID), None)
                 if location_obj: location_id = int(location_obj.ID)
                 else: display_message("warning", f"Location '{location_name}' not found (case-insensitive name match).")
             else: display_message("warning", f"No service locations returned for PracticeID {practice_id}.")
@@ -240,15 +273,15 @@ def get_primary_case_for_patient(client_obj, header_obj, patient_id_to_fetch):
             get_patient_req_type = client_obj.get_type('ns0:GetPatientReq')
             filter_type = client_obj.get_type('ns0:SinglePatientFilter')
             p_filter = filter_type(PatientID=int(patient_id_to_fetch))
-            request_data = get_patient_req_type(RequestHeader=header_obj, Filter=p_filter) # Default fields
+            request_data = get_patient_req_type(RequestHeader=header_obj, Filter=p_filter)
             api_response = client_obj.service.GetPatient(request=request_data)
             if hasattr(api_response, 'ErrorResponse') and api_response.ErrorResponse and api_response.ErrorResponse.IsError: raise Exception(f"API Error: {api_response.ErrorResponse.ErrorMessage}")
             if hasattr(api_response, 'SecurityResponse') and api_response.SecurityResponse and not api_response.SecurityResponse.Authorized: raise Exception(f"Auth Error: {api_response.SecurityResponse.SecurityResult}")
             if hasattr(api_response, 'Patient') and api_response.Patient and hasattr(api_response.Patient, 'Cases') and \
                api_response.Patient.Cases and hasattr(api_response.Patient.Cases, 'PatientCaseData') and api_response.Patient.Cases.PatientCaseData:
                 cases = api_response.Patient.Cases.PatientCaseData
-                if not isinstance(cases, list): cases = [cases] # Ensure 'cases' is a list
-                primary = next((c for c in cases if hasattr(c, 'IsPrimaryCase') and ((isinstance(c.IsPrimaryCase, bool) and c.IsPrimaryCase) or (isinstance(c.IsPrimaryCase, str) and c.IsPrimaryCase.lower() == 'true')) and hasattr(c, 'PatientCaseID') and c.PatientCaseID), None) # MODIFIED: Added hasattr checks
+                if not isinstance(cases, list): cases = [cases]
+                primary = next((c for c in cases if hasattr(c, 'IsPrimaryCase') and ((isinstance(c.IsPrimaryCase, bool) and c.IsPrimaryCase) or (isinstance(c.IsPrimaryCase, str) and c.IsPrimaryCase.lower() == 'true')) and hasattr(c, 'PatientCaseID') and c.PatientCaseID), None)
                 if primary: case_id_found = int(primary.PatientCaseID)
                 elif cases and hasattr(cases[0], 'PatientCaseID') and cases[0].PatientCaseID : case_id_found = int(cases[0].PatientCaseID)
         except Exception as e: display_message("error", f"Error fetching CaseID for Pt {patient_id_to_fetch}: {e}")
@@ -265,149 +298,263 @@ def create_practice_identifier_payload(c, p): return c.get_type('ns0:PracticeIde
 def create_place_of_service_payload(client_obj, pos_val_excel):
     payload_type = client_obj.get_type('ns0:EncounterPlaceOfService')
     code, name = None, None
-    if pd.isna(pos_val_excel) or not str(pos_val_excel).strip(): return None
-    norm_pos = str(pos_val_excel).strip()
-    if norm_pos.upper() in POS_CODE_MAP: code, name = POS_CODE_MAP[norm_pos.upper()]["code"], POS_CODE_MAP[norm_pos.upper()]["name"]
-    elif norm_pos.isdigit() and len(norm_pos) <=2 : #MODIFIED: ensure it's a 2 digit code only
-        code, name = norm_pos, next((d["name"] for _, d in POS_CODE_MAP.items() if d["code"] == norm_pos), norm_pos)
-    else: # If not in map or not a simple 2-digit code, try to use it as is if it's short, else error
-        if len(norm_pos) <= 2: # Accept as code if short
-             code, name = norm_pos, norm_pos
-             display_message("info", f"POS value '{norm_pos}' not in standard map, using directly as code and name.")
-        else: # Too long to be a valid code if not in map
-            display_message("error", f"POS value '{norm_pos}' is not in standard map and is not a valid 2-digit code format.")
-            return None
-    if not code: return None # Should be caught by earlier checks
-    try: return payload_type(PlaceOfServiceCode=str(code), PlaceOfServiceName=str(name)) # Ensure strings
+    if pd.isna(pos_val_excel) or not str(pos_val_excel).strip(): 
+        display_message("warning", "Place of Service value is blank in Excel. Cannot create POS payload.")
+        return None
+    norm_pos_input = str(pos_val_excel).strip()
+    norm_pos_upper = norm_pos_input.upper()
+
+    if norm_pos_upper in POS_CODE_MAP:
+        code = POS_CODE_MAP[norm_pos_upper]["code"]
+        name = POS_CODE_MAP[norm_pos_upper]["name"]
+    elif norm_pos_input.isdigit() and len(norm_pos_input) <= 2:
+        code = norm_pos_input
+        name = next((d["name"] for _, d in POS_CODE_MAP.items() if d["code"] == code), norm_pos_input) 
+    else:
+        display_message("error", f"POS value '{norm_pos_input}' is not in standard map and not a valid 2-digit code format.")
+        return None
+        
+    if not code: return None 
+    try: return payload_type(PlaceOfServiceCode=str(code), PlaceOfServiceName=str(name))
     except Exception:
         try: return payload_type(PlaceOfServiceCode=str(code))
         except Exception as e2: display_message("error", f"POS Payload Error: {e2}"); return None
 
-
-def create_service_line_payload(client_obj, sld, start_dt, end_dt):
+def create_service_line_payload(client_obj, sld, start_dt_api_str, end_dt_api_str):
     slt = client_obj.get_type('ns0:ServiceLineReq')
-    pc, u, d1 = str(sld.get(COL_PROCEDURES, "")).strip(), sld.get(COL_UNITS), str(sld.get(COL_DIAG1, "")).strip()
-    if not pc or u is None or pd.isna(u) or not d1: return None
-    try: uf = float(u)
-    except ValueError: return None
+    pc = str(sld.get(COL_PROCEDURES, "")).strip()
+    u = sld.get(COL_UNITS)
+    d1_val = sld.get(COL_DIAG1) 
+
+    row_num_for_log = sld.get('original_excel_row_num', 'N/A')
+
+    if not pc: 
+        display_message("warning", f"Row {row_num_for_log}: Procedure code missing. SvcLine not created.")
+        return None
+    if u is None or pd.isna(u) or str(u).strip() == "":
+        display_message("warning", f"Row {row_num_for_log} (Proc {pc}): Units missing or blank. SvcLine not created.")
+        return None
+    if d1_val is None or pd.isna(d1_val) or not str(d1_val).strip():
+        display_message("warning", f"Row {row_num_for_log} (Proc {pc}): Diag1 missing or blank. SvcLine not created.")
+        return None
     
-    def clean_val(val, is_modifier=False): # MODIFIED: Combined cleaner
+    try: 
+        uf = float(u)
+        if uf <= 0: 
+            display_message("warning", f"Row {row_num_for_log} (Proc {pc}): Units must be > 0. Value: {uf}. SvcLine not created.")
+            return None
+    except ValueError: 
+        display_message("warning", f"Row {row_num_for_log} (Proc {pc}): Units '{u}' not valid number. SvcLine not created.")
+        return None
+    
+    def clean_val(val, is_modifier=False, is_diag=False):
         s_val = str(val if pd.notna(val) else "").strip()
-        if is_modifier and s_val.endswith(".0"): # Specific cleaning for modifiers like "59.0"
-            s_val = s_val[:-2]
+        if is_modifier:
+            if s_val.endswith(".0"): s_val = s_val[:-2]
+            if s_val and len(s_val) > 2 :
+                 display_message("warning", f"Row {row_num_for_log} (Proc {pc}): Modifier '{s_val}' is longer than 2 characters. Using first 2: '{s_val[:2]}'.")
+                 s_val = s_val[:2]
         return s_val if s_val and s_val.lower() != 'nan' else None
 
     m1 = clean_val(sld.get(COL_MOD1), is_modifier=True)
     m2 = clean_val(sld.get(COL_MOD2), is_modifier=True)
-    
+    d1_cleaned = clean_val(d1_val, is_diag=True) 
+
+    if not d1_cleaned: 
+        display_message("warning", f"Row {row_num_for_log} (Proc {pc}): Diag1 became invalid after cleaning. SvcLine not created.")
+        return None
+
     args = {
         'ProcedureCode': pc, 'Units': uf, 
-        'ServiceStartDate': format_datetime_for_api(start_dt), # Ensure consistent API format
-        'ServiceEndDate': format_datetime_for_api(end_dt),     # Ensure consistent API format
-        'DiagnosisCode1': clean_val(d1) # Use clean_val for diags too (for stripping and nan check)
+        'ServiceStartDate': start_dt_api_str, 
+        'ServiceEndDate': end_dt_api_str,    
+        'DiagnosisCode1': d1_cleaned
     }
     if m1: args['ProcedureModifier1'] = m1
     if m2: args['ProcedureModifier2'] = m2
-    diag2 = clean_val(sld.get(COL_DIAG2)); diag3 = clean_val(sld.get(COL_DIAG3)); diag4 = clean_val(sld.get(COL_DIAG4))
+    
+    diag2 = clean_val(sld.get(COL_DIAG2), is_diag=True); 
+    diag3 = clean_val(sld.get(COL_DIAG3), is_diag=True); 
+    diag4 = clean_val(sld.get(COL_DIAG4), is_diag=True)
+    
     if diag2: args['DiagnosisCode2'] = diag2
     if diag3: args['DiagnosisCode3'] = diag3
     if diag4: args['DiagnosisCode4'] = diag4
     
     try: return slt(**args)
-    except Exception as e: display_message("error", f"SvcLine Payload Error for Proc {pc}: {e} with args {args}"); return None
+    except Exception as e: 
+        display_message("error", f"SvcLine Payload Error for Proc {pc} (Row {row_num_for_log}): {e} with args {args}")
+        return None
 
-# --- Main Processing Logic ---
+# --- XML Error Parsing Function ---
+def parse_and_simplify_tebra_xml_error(xml_string, patient_id_context="N/A", dos_context="N/A"):
+    if not xml_string or not isinstance(xml_string, str) or "<Encounter" not in xml_string :
+        return xml_string 
+
+    simplified_errors = []
+    try:
+        if xml_string.startswith("API Error: "):
+            xml_string = xml_string[len("API Error: "):].strip()
+        
+        service_line_pattern = r"<ServiceLine>(.*?)</ServiceLine>"
+        diag_error_pattern = r"<DiagnosisCode(?P<diag_num>\d)>(?P<diag_code_val>[^<]+?)<err id=\"\d+\">(?P<err_msg>[^<]+)</err>"
+        mod_error_pattern = r"<ProcedureModifier(?P<mod_num>\d)>(?P<mod_code_val>[^<]+?)<err id=\"\d+\">(?P<err_msg>[^<]+)</err>"
+        proc_code_pattern = r"<ProcedureCode>(?P<proc_code_val>[^<]+)</ProcedureCode>"
+
+        service_lines_xml = re.findall(service_line_pattern, xml_string, re.DOTALL)
+        
+        sl_counter_for_log = 0
+        for sl_xml_content in service_lines_xml:
+            sl_counter_for_log += 1 
+            proc_code = "N/A"
+            proc_match = re.search(proc_code_pattern, sl_xml_content)
+            if proc_match:
+                proc_code = proc_match.group("proc_code_val")
+
+            for match in re.finditer(diag_error_pattern, sl_xml_content):
+                group_dict = match.groupdict()
+                simple_msg = group_dict['err_msg'].split(',')[0].strip() 
+                simplified_errors.append(f"L{sl_counter_for_log} (Proc {proc_code}): Diag {group_dict['diag_num']} ('{group_dict['diag_code_val']}') - {simple_msg}.")
+            
+            for match in re.finditer(mod_error_pattern, sl_xml_content):
+                group_dict = match.groupdict()
+                simple_msg = group_dict['err_msg'].split(',')[0].strip()
+                mod_val = group_dict['mod_code_val']
+                error_text = f"L{sl_counter_for_log} (Proc {proc_code}): Mod {group_dict['mod_num']} ('{mod_val}') - {simple_msg}."
+                if ".0" in mod_val:
+                    error_text += " (Note: Modifiers should be 2 chars, e.g., '59' not '59.0')."
+                simplified_errors.append(error_text)
+
+        overall_encounter_error_match = re.search(r'<err id="6100">(.*?)</err>', xml_string)
+        if overall_encounter_error_match :
+            if not simplified_errors: # Only add general if no specific line errors found
+                 simplified_errors.append(f"Encounter Creation Failed: {overall_encounter_error_match.group(1).strip()}.")
+
+        if not simplified_errors and xml_string.startswith("<Encounter"): 
+            simplified_errors.append("Encounter creation failed. No specific line errors parsed. Review raw API response.")
+        elif not simplified_errors: 
+            return xml_string 
+
+        return "; ".join(list(set(simplified_errors))) if simplified_errors else "Encounter processing failed with unspecified service line errors."
+        
+    except Exception as e_parse:
+        return "Error simplifying API message. Original: " + xml_string[:300] + "..."
+
+
+# --- Main Processing Logic (MODIFIED for DOS Grouping and Error Simplification) ---
 def process_excel_data(client_obj, header_obj, current_practice_id, df_excel_data):
-    processed_rows_data = df_excel_data.to_dict(orient='records')
-    for r_idx, r_val in enumerate(processed_rows_data): # Use enumerate for index
-        r_val['Charge Entry Status'], r_val['Reason for Failure'] = "Pending", ""
-        processed_rows_data[r_idx] = r_val # Ensure update takes effect
+    df_results = df_excel_data.copy()
+    df_results['Charge Entry Status'] = "Pending" 
+    df_results[COL_RESULT_MESSAGE] = "" 
 
     try:
         enc_type = client_obj.get_type('ns0:EncounterCreate')
         create_req_type = client_obj.get_type('ns0:CreateEncounterReq')
-        case_id_type = client_obj.get_type('ns0:PatientCaseIdentifierReq')
+        case_id_type = client_obj.get_type('ns0:PatientCaseIdentifierReq') 
         arr_sl_req_type = client_obj.get_type('ns0:ArrayOfServiceLineReq')
     except Exception as e:
         display_message("error", f"Fatal WSDL Type Error: {e}. Cannot process.")
-        for r_idx in range(len(processed_rows_data)):
-            processed_rows_data[r_idx]['Charge Entry Status'] = "Failed"
-            processed_rows_data[r_idx]['Reason for Failure'] = f"WSDL Type Error: {e}"
-        return processed_rows_data
+        df_results['Charge Entry Status'] = "Failed"
+        df_results[COL_RESULT_MESSAGE] = f"WSDL Type Error: {e}"
+        # Define expected output columns for consistent error output
+        output_columns = df_excel_data.columns.tolist() + ['original_excel_row_num', 'Charge Entry Status', COL_RESULT_MESSAGE]
+        # Remove duplicates while preserving order
+        output_columns = sorted(list(set(output_columns)), key=lambda x: output_columns.index(x) if x in output_columns else float('inf'))
+        for col in output_columns:
+            if col not in df_results.columns: df_results[col] = None # Add if missing
+        return df_results.reindex(columns=output_columns).fillna(''), 0, 0
+
 
     keys_to_clear = [k for k in st.session_state if k.startswith("provider_id_") or k.startswith("location_id_") or k.startswith("patient_case_")]
-    for k in keys_to_clear: del st.session_state[k]
+    for k in keys_to_clear: 
+        if k in st.session_state: del st.session_state[k]
 
-    # MODIFIED GROUPING LOGIC
     grouped_charges = defaultdict(lambda: {'encounter_details_source_row_dict': None, 
                                            'service_lines_data_list': [], 
                                            'original_df_indices': []})
-    display_message("info", "Grouping Excel Rows by Patient, Date of Service, and Case...")
+    
+    display_message("info", "Grouping Excel Rows by Patient, From Date (DOS), and Case...")
     pb_group = st.progress(0)
     grouping_warnings = []
 
-    for df_idx, row_series in df_excel_data.iterrows(): # Use df_idx from iterrows()
+    for df_idx, row_series in df_excel_data.iterrows():
         pb_group.progress((df_idx + 1) / len(df_excel_data))
+        
         pid_val = row_series.get(COL_PATIENT_ID)
-        from_date_val = row_series.get(COL_FROM_DATE) # Key for grouping
+        from_date_val = row_series.get(COL_FROM_DATE) 
 
-        current_row_status, current_row_reason = "Failed", ""
+        current_row_grouping_status, current_row_grouping_reason = "Failed to Group", ""
 
-        if pd.isna(pid_val): current_row_reason = f"'{COL_PATIENT_ID}' missing."
-        elif pd.isna(from_date_val): current_row_reason = f"'{COL_FROM_DATE}' missing (required for grouping)."
+        if pd.isna(pid_val) or str(pid_val).strip() == "":
+            current_row_grouping_reason = f"'{COL_PATIENT_ID}' is missing."
+        elif pd.isna(from_date_val) or str(from_date_val).strip() == "": 
+            current_row_grouping_reason = f"'{COL_FROM_DATE}' (Date of Service) is missing for grouping."
         else:
             try:
                 pid_grp = int(pid_val)
-                # Normalize from_date_val to string 'YYYY-MM-DD' for consistent grouping key
                 from_date_str_key = pd.to_datetime(from_date_val).strftime('%Y-%m-%d')
             except ValueError:
-                current_row_reason = f"'{COL_PATIENT_ID}' ('{pid_val}') or '{COL_FROM_DATE}' ('{from_date_val}') invalid format."
+                current_row_grouping_reason = f"Invalid format for '{COL_PATIENT_ID}' ('{pid_val}') or '{COL_FROM_DATE}' ('{from_date_val}')."
+            except Exception as e_date_parse: 
+                 current_row_grouping_reason = f"Error parsing '{COL_FROM_DATE}' ('{from_date_val}') for grouping key: {e_date_parse}."
             else:
                 cid_for_group = get_primary_case_for_patient(client_obj, header_obj, pid_grp)
                 if not cid_for_group:
-                    current_row_reason = f"No existing case found in Tebra for Patient {pid_grp}."
+                    current_row_grouping_reason = f"No existing Tebra case found for Patient ID {pid_grp}."
                 else:
-                    current_row_status = "Grouped"
-                    # MODIFIED grp_key to include normalized From Date string
-                    grp_key = (pid_grp, from_date_str_key, cid_for_group)
+                    current_row_grouping_status = "Grouped Successfully"
+                    grp_key = (pid_grp, from_date_str_key, cid_for_group) 
                     
-                    row_dict = row_series.to_dict() # Convert current row to dict for storing
+                    row_dict_for_group = row_series.to_dict()
+                    row_dict_for_group['original_excel_row_num'] = df_excel_data.loc[df_idx, 'original_excel_row_num']
+                    
                     if not grouped_charges[grp_key]['encounter_details_source_row_dict']:
-                        grouped_charges[grp_key]['encounter_details_source_row_dict'] = row_dict
-                    grouped_charges[grp_key]['service_lines_data_list'].append(row_dict)
-                    grouped_charges[grp_key]['original_df_indices'].append(df_idx) # Store original DataFrame index
-
-        if current_row_status == "Failed":
-             processed_rows_data[df_idx]['Charge Entry Status'] = current_row_status # Update specific row by index
-             processed_rows_data[df_idx]['Reason for Failure'] = current_row_reason
-             grouping_warnings.append(f"Row {df_idx+2}: {current_row_reason}") # df_idx is 0-based, Excel is 1-based + header
+                        grouped_charges[grp_key]['encounter_details_source_row_dict'] = row_dict_for_group
+                    grouped_charges[grp_key]['service_lines_data_list'].append(row_dict_for_group) 
+                    grouped_charges[grp_key]['original_df_indices'].append(df_idx) 
+        
+        if current_row_grouping_status == "Failed to Group":
+             df_results.loc[df_idx, 'Charge Entry Status'] = "Failed"
+             df_results.loc[df_idx, COL_RESULT_MESSAGE] = current_row_grouping_reason
+             grouping_warnings.append(f"Row {row_series.get('original_excel_row_num', df_idx+2)}: {current_row_grouping_reason}")
     
     pb_group.empty()
-    if grouping_warnings: display_message("warning", "Issues during grouping:<br>" + "<br>".join(grouping_warnings))
+    if grouping_warnings: display_message("warning", "Issues during grouping stage:<br>" + "<br>".join(grouping_warnings))
 
-    display_message("info", f"Processing {len(grouped_charges)} Grouped Encounters...")
-    if not grouped_charges:
-         if len(df_excel_data) > 0: display_message("warning", "No valid groups formed.")
-         else: display_message("info", "No data rows found in file.")
-         return processed_rows_data
+    valid_groups_to_process = {k: v for k, v in grouped_charges.items() if v['encounter_details_source_row_dict'] is not None}
 
-    pb_proc = st.progress(0); proc_grp_cnt = 0; success_groups = 0; fail_groups = 0
+    display_message("info", f"Processing {len(valid_groups_to_process)} unique encounter groups...")
+    
+    proc_grp_cnt = 0
+    success_groups = 0 
+    fail_groups = 0    
 
-    for grp_key, data_dict in grouped_charges.items(): # MODIFIED: Use consistent naming
-        proc_grp_cnt += 1; pb_proc.progress(proc_grp_cnt / len(grouped_charges))
-        # pid_for_api, from_date_key, case_id_for_api = grp_key # Unpack the new group key
-        pid_for_api, _, case_id_for_api = grp_key # from_date_key is in enc_src for dates
+    if not valid_groups_to_process and not grouping_warnings:
+         if len(df_excel_data) > 0: display_message("warning", "No valid encounter groups were formed for processing.")
+         else: display_message("info", "No data rows found in the uploaded file to process.")
+         # Ensure consistent output columns even if no groups processed
+         final_cols_on_no_groups = df_excel_data.columns.tolist() + ['original_excel_row_num', 'Charge Entry Status', COL_RESULT_MESSAGE]
+         final_cols_on_no_groups = sorted(list(set(final_cols_on_no_groups)), key=lambda x: final_cols_on_no_groups.index(x) if x in final_cols_on_no_groups else float('inf'))
+         for col in final_cols_on_no_groups:
+            if col not in df_results.columns: df_results[col] = None
+         return df_results.reindex(columns=final_cols_on_no_groups).fillna(''), success_groups, fail_groups
 
-        enc_src_dict = data_dict['encounter_details_source_row_dict'] # Renamed for clarity
-        sl_to_proc_list = data_dict['service_lines_data_list']     # Renamed for clarity
-        orig_indices_list = data_dict['original_df_indices']       # Renamed for clarity
+
+    pb_proc = st.progress(0)
+
+    for grp_key, data_dict in valid_groups_to_process.items():
+        proc_grp_cnt += 1; pb_proc.progress(proc_grp_cnt / len(valid_groups_to_process))
+        pid_for_api, dos_key_str, case_id_for_api = grp_key
+
+        enc_src_dict = data_dict['encounter_details_source_row_dict']
+        sl_to_proc_list = data_dict['service_lines_data_list']
+        orig_indices_list = data_dict['original_df_indices']
         
-        grp_status, grp_fail_reason = "Failed", "Group processing did not complete."
+        grp_api_status, grp_api_message = "Failed", "Group processing did not complete."
         log_ph = st.empty()
-        # Use original Excel row numbers from the list for logging
-        excel_row_nums_str = ", ".join([str(processed_rows_data[i].get('original_excel_row_num', i+2)) for i in orig_indices_list])
-        log_ph.info(f"Processing Grp: Pt {pid_for_api}, Case {case_id_for_api}, DOS {enc_src_dict[COL_FROM_DATE]} (Orig. Excel Rows: {excel_row_nums_str})")
-
+        
+        first_row_excel_num_for_log = df_results.loc[orig_indices_list[0], 'original_excel_row_num']
+        log_ph.info(f"Processing Group: Pt {pid_for_api}, DOS {dos_key_str}, Case {case_id_for_api} (Excel Rows ~{first_row_excel_num_for_log})")
 
         try:
             rp_name = str(enc_src_dict.get(COL_RENDERING_PROVIDER, "")).strip()
@@ -423,17 +570,16 @@ def process_excel_data(client_obj, header_obj, current_practice_id, df_excel_dat
             sch_p_name = str(enc_src_dict.get(COL_SCHEDULING_PROVIDER, "")).strip()
             sch_p_pyld = None
             if sch_p_name:
-                # log_ph.info(f"Grp {grp_key}: Looking up Scheduling Provider '{sch_p_name}'...") # Redundant with main log
                 sch_p_id = get_provider_id_by_name(client_obj, header_obj, current_practice_id, sch_p_name)
-                if not sch_p_id: display_message("warning", f"Grp (Pt {pid_for_api}, DOS {enc_src_dict[COL_FROM_DATE]}): Active Scheduling Provider ID NOT FOUND for '{sch_p_name}'. Encounter will be created without it.")
+                if not sch_p_id: display_message("warning", f"Group (Pt {pid_for_api}, DOS {dos_key_str}): Active Scheduling Provider ID NOT FOUND for '{sch_p_name}'. Encounter will omit it.")
                 else: sch_p_pyld = create_provider_identifier_payload(client_obj, sch_p_id)
             
-            batch_num_val = str(enc_src_dict.get(COL_BATCH_NUMBER, "")).strip()
+            batch_num_val = str(enc_src_dict.get(COL_BATCH_NUMBER, "")).strip() if pd.notna(enc_src_dict.get(COL_BATCH_NUMBER)) else None
                 
             enc_start_dt_api = format_datetime_for_api(enc_src_dict.get(COL_FROM_DATE))
-            enc_end_dt_api = format_datetime_for_api(enc_src_dict.get(COL_THROUGH_DATE)) # ThroughDate still used for header
-            if not enc_start_dt_api : raise ValueError(f"Encounter '{COL_FROM_DATE}' invalid for group.")
-            if not enc_end_dt_api : enc_end_dt_api = enc_start_dt_api # Fallback if Through Date is missing/invalid
+            enc_end_dt_api = format_datetime_for_api(enc_src_dict.get(COL_THROUGH_DATE))
+            if not enc_start_dt_api : raise ValueError(f"Encounter '{COL_FROM_DATE}' invalid for group (key: {dos_key_str}).")
+            if not enc_end_dt_api : enc_end_dt_api = enc_start_dt_api
 
             pt_pyld = create_patient_identifier_payload(client_obj, pid_for_api)
             rp_pyld = create_provider_identifier_payload(client_obj, rp_id)
@@ -445,71 +591,96 @@ def process_excel_data(client_obj, header_obj, current_practice_id, df_excel_dat
             if not pos_excel_val:
                 enc_mode_val = str(enc_src_dict.get(COL_ENCOUNTER_MODE, "")).strip()
                 if enc_mode_val: pos_excel_val = enc_mode_val
-                else: raise ValueError(f"'{COL_PLACE_OF_SERVICE_EXCEL}' & '{COL_ENCOUNTER_MODE}' missing.")
+                else: raise ValueError(f"Both '{COL_PLACE_OF_SERVICE_EXCEL}' & '{COL_ENCOUNTER_MODE}' are missing.")
             pos_pyld = create_place_of_service_payload(client_obj, pos_excel_val)
             if not pos_pyld: raise ValueError(f"POS payload creation failed for '{pos_excel_val}'.")
 
             all_sl_objs = []
-            line_errors_grp = [] # Renamed to avoid conflict
+            line_errors_grp = []
             for line_idx, sld_item_dict in enumerate(sl_to_proc_list):
-                # Service line dates should be consistent with the encounter header for this group
-                sl_start_dt = format_datetime_for_api(sld_item_dict.get(COL_FROM_DATE))
-                sl_end_dt = format_datetime_for_api(sld_item_dict.get(COL_THROUGH_DATE))
-                if not sl_start_dt: sl_start_dt = enc_start_dt_api # Default to encounter header date
-                if not sl_end_dt: sl_end_dt = enc_end_dt_api     # Default to encounter header date
+                if 'original_excel_row_num' not in sld_item_dict:
+                     sld_item_dict['original_excel_row_num'] = df_results.loc[orig_indices_list[line_idx], 'original_excel_row_num']
 
-                # Crucial check: ensure service line dates match the group's DOS if strict adherence is needed.
-                # For now, we use the dates from the line, defaulting to encounter header dates.
-                # The grouping by FromDate should ensure consistency for enc_start_dt_api.
-
-                sl_obj = create_service_line_payload(client_obj, sld_item_dict, sl_start_dt, sl_end_dt)
+                sl_obj = create_service_line_payload(client_obj, sld_item_dict, enc_start_dt_api, enc_end_dt_api)
                 if not sl_obj: 
-                    line_errors_grp.append(f"L{line_idx+1}(Proc:{sld_item_dict.get(COL_PROCEDURES, 'N/A')}, ExcelRow:{processed_rows_data[orig_indices_list[line_idx]].get('original_excel_row_num', orig_indices_list[line_idx]+2)}): Creation Failed")
+                    line_errors_grp.append(f"SvcLine for Proc '{sld_item_dict.get(COL_PROCEDURES, 'N/A')}' (orig Excel row {sld_item_dict.get('original_excel_row_num','N/A')}) failed creation.")
                     continue
                 all_sl_objs.append(sl_obj)
             
-            if line_errors_grp: raise ValueError("Service Line Errors: " + "; ".join(line_errors_grp))
-            if not all_sl_objs: raise ValueError("No valid service lines created for this group.")
+            if line_errors_grp: raise ValueError("Service Line Payload Errors: " + "; ".join(line_errors_grp))
+            if not all_sl_objs: raise ValueError("No valid service lines were created for this encounter.")
 
             sl_arr_pyld = arr_sl_req_type(ServiceLineReq=all_sl_objs)
-            enc_args = {"Patient": pt_pyld, "RenderingProvider": rp_pyld, "ServiceLocation": sloc_pyld,
-                    "PlaceOfService": pos_pyld, "ServiceStartDate": enc_start_dt_api, "ServiceEndDate": enc_end_dt_api,
-                    "ServiceLines": sl_arr_pyld, "Practice": prac_pyld, "EncounterStatus": "Draft", "Case": case_pyld_obj}
+            enc_args = {
+                "Patient": pt_pyld, "RenderingProvider": rp_pyld, "ServiceLocation": sloc_pyld,
+                "PlaceOfService": pos_pyld, "ServiceStartDate": enc_start_dt_api, 
+                "ServiceEndDate": enc_end_dt_api, "ServiceLines": sl_arr_pyld, 
+                "Practice": prac_pyld, "EncounterStatus": "Draft", "Case": case_pyld_obj
+            }
             if sch_p_pyld: enc_args["SchedulingProvider"] = sch_p_pyld
             if batch_num_val: enc_args["BatchNumber"] = batch_num_val
-            enc_pyld = enc_type(**enc_args)
-            final_req = create_req_type(RequestHeader=header_obj, Encounter=enc_pyld)
             
-            log_ph.info(f"Grp (Pt {pid_for_api}, DOS {enc_src_dict[COL_FROM_DATE]}): Calling CreateEncounter API...")
+            enc_pyld_obj = enc_type(**enc_args) 
+            final_req = create_req_type(RequestHeader=header_obj, Encounter=enc_pyld_obj) 
+            
+            log_ph.info(f"Group (Pt {pid_for_api}, DOS {dos_key_str}): Calling CreateEncounter API...")
             api_resp = client_obj.service.CreateEncounter(request=final_req)
 
-            if hasattr(api_resp, 'ErrorResponse') and api_resp.ErrorResponse and api_resp.ErrorResponse.IsError: grp_fail_reason = f"API Error: {api_resp.ErrorResponse.ErrorMessage}"
-            elif hasattr(api_resp, 'SecurityResponse') and api_resp.SecurityResponse and not api_resp.SecurityResponse.Authorized: grp_fail_reason = f"Auth Error: {api_resp.SecurityResponse.SecurityResult}"
-            elif hasattr(api_resp, 'EncounterID') and api_resp.EncounterID:
-                grp_status, grp_fail_reason = "Done", f"{api_resp.EncounterID}"
-                log_ph.success(f"Grp (Pt {pid_for_api}, DOS {enc_src_dict[COL_FROM_DATE]}): SUCCESS! EncounterID: {api_resp.EncounterID}")
+            if hasattr(api_resp, 'ErrorResponse') and api_resp.ErrorResponse and api_resp.ErrorResponse.IsError:
+                grp_api_message = parse_and_simplify_tebra_xml_error(api_resp.ErrorResponse.ErrorMessage, pid_for_api, dos_key_str)
+            elif hasattr(api_resp, 'SecurityResponse') and api_resp.SecurityResponse and not api_resp.SecurityResponse.Authorized:
+                grp_api_message = f"API Auth Error: {api_resp.SecurityResponse.SecurityResult}"
+            elif hasattr(api_resp, 'EncounterID') and api_resp.EncounterID is not None:
+                grp_api_status = "Done" 
+                grp_api_message = f"{api_resp.EncounterID}" 
+                log_ph.success(f"Group (Pt {pid_for_api}, DOS {dos_key_str}): SUCCESS! EncounterID: {api_resp.EncounterID}")
                 success_groups += 1
-            else: grp_fail_reason = f"Unknown API resp: {zeep.helpers.serialize_object(api_resp,dict) if api_resp else 'None'}"
+            else:
+                raw_resp_str = str(zeep.helpers.serialize_object(api_resp, dict) if api_resp else 'None')
+                grp_api_message = f"Unknown API response: {raw_resp_str[:250]}..."
         
-        except ValueError as ve: grp_fail_reason = str(ve)
-        except SoapFault as sf: grp_fail_reason = f"SOAP FAULT: {sf.message} (Code: {sf.code})"
-        except ZeepLookupError as le: grp_fail_reason = f"Zeep Type Lookup Error: {le}"
-        except Exception as e: grp_fail_reason = f"UNEXPECTED SCRIPT ERROR: {type(e).__name__} - {e}"
-
-        if grp_status == "Failed":
-             log_ph.error(f"Grp (Pt {pid_for_api}, DOS {enc_src_dict[COL_FROM_DATE]}): FAILED. {grp_fail_reason}")
+        except ValueError as ve: grp_api_message = str(ve)
+        except SoapFault as sf: grp_api_message = f"SOAP FAULT: {sf.message} (Code: {sf.code})"
+        except ZeepLookupError as le: grp_api_message = f"Zeep Type Lookup Error (WSDL issue?): {le}"
+        except Exception as e: 
+            grp_api_message = f"UNEXPECTED SCRIPT ERROR: {type(e).__name__} - {str(e)[:150]}"
+        
+        if grp_api_status == "Failed":
+             log_ph.error(f"Group (Pt {pid_for_api}, DOS {dos_key_str}): FAILED. {grp_api_message}")
              fail_groups += 1
         
-        for orig_df_idx in orig_indices_list: # Update original DataFrame rows
-            processed_rows_data[orig_df_idx]['Charge Entry Status'] = grp_status
-            processed_rows_data[orig_df_idx]['Reason for Failure'] = grp_fail_reason
+        for orig_df_idx in orig_indices_list:
+            df_results.loc[orig_df_idx, 'Charge Entry Status'] = grp_api_status
+            df_results.loc[orig_df_idx, COL_RESULT_MESSAGE] = grp_api_message
+        
         time.sleep(0.05)
 
     pb_proc.empty()
     summary_msg = f"Encounter processing finished. Groups Processed: {proc_grp_cnt}, Successful Groups: {success_groups}, Failed Groups: {fail_groups}."
-    if fail_groups > 0 : display_message("warning", summary_msg + " Check 'Reason for Failure' column in results.")
+    if fail_groups > 0 : display_message("warning", summary_msg + f" Check '{COL_RESULT_MESSAGE}' column in results.")
     else: display_message("success", summary_msg)
-    return processed_rows_data
+    
+    # --- Define the final output column order ---
+    # Start with the original columns from the input Excel, in their original order
+    output_column_order = df_excel_data.columns.tolist()
+    # Append the two new status columns at the end
+    if 'Charge Entry Status' not in output_column_order: # Should be added by df_results init
+        output_column_order.append('Charge Entry Status')
+    if COL_RESULT_MESSAGE not in output_column_order: # New result column
+        output_column_order.append(COL_RESULT_MESSAGE)
+    
+    # Remove 'original_excel_row_num' if it exists, as it's not for final output
+    if 'original_excel_row_num' in output_column_order:
+        output_column_order.remove('original_excel_row_num')
+    
+    # Ensure all columns in df_results are included, even if not in original_input_columns
+    # This handles any unexpected columns that might have been added.
+    for col in df_results.columns:
+        if col not in output_column_order and col != 'original_excel_row_num':
+            output_column_order.append(col)
+            
+    return df_results.reindex(columns=output_column_order).fillna(''), success_groups, fail_groups
+
 
 # --- Streamlit Application UI ---
 def main():
@@ -518,18 +689,17 @@ def main():
     st.subheader(APP_SUBTITLE)
 
     st.sidebar.header("Tebra Credentials")
-    customer_key_val = st.sidebar.text_input("Customer Key", type="password", key="sb_customer_key")
-    user_email_val = st.sidebar.text_input("Username (email)", key="sb_user_email")
-    user_password_val = st.sidebar.text_input("Password", type="password", key="sb_user_password")
+    customer_key_val = st.sidebar.text_input("Customer Key", type="password", key="sb_customer_key_v5") 
+    user_email_val = st.sidebar.text_input("Username (email)", key="sb_user_email_v5")
+    user_password_val = st.sidebar.text_input("Password", type="password", key="sb_user_password_v5")
 
     st.sidebar.header("Upload Charge Data")
-    uploaded_file_val = st.sidebar.file_uploader("Upload Excel File (.xlsx)", type="xlsx", key="sb_uploaded_file")
+    uploaded_file_val = st.sidebar.file_uploader("Upload Excel File (.xlsx)", type="xlsx", key="sb_uploaded_file_v5")
     
-    # Initialize original_excel_row_num in session state if it doesn't exist
-    if 'original_excel_row_num' not in st.session_state:
-        st.session_state.original_excel_row_num = 2 # Start from row 2 (1-based index + header)
+    if 'original_excel_row_num_start' not in st.session_state: 
+        st.session_state.original_excel_row_num_start = 2 
 
-    process_button_val = st.sidebar.button("Process Charges", key="sb_process_button")
+    process_button_val = st.sidebar.button("Process Charges", key="sb_process_button_v5")
     results_placeholder = st.container()
 
     if process_button_val:
@@ -537,9 +707,13 @@ def main():
         with results_placeholder:
             if not customer_key_val or not user_email_val or not user_password_val: display_message("error", "❌ Please enter all Tebra credentials."); st.stop()
             if uploaded_file_val is None: display_message("error", "❌ Please upload an Excel file."); st.stop()
+            
             credentials = {"CustomerKey": customer_key_val, "User": user_email_val, "Password": user_password_val}
-            keys_to_clear = [k for k in st.session_state if k.startswith("practice_id_") or k.startswith("provider_id_") or k.startswith("location_id_") or k.startswith("patient_case_")]
-            for k in keys_to_clear: del st.session_state[k]
+            
+            keys_to_clear_main = [k for k in st.session_state if k.startswith("practice_id_") or k.startswith("provider_id_") or k.startswith("location_id_") or k.startswith("patient_case_")]
+            for k_main in keys_to_clear_main: 
+                if k_main in st.session_state: del st.session_state[k_main]
+
             with st.spinner("Connecting to Tebra API and verifying practice..."):
                 client = create_api_client(TEBRA_WSDL_URL)
                 if not client: st.stop()
@@ -548,39 +722,56 @@ def main():
                 practice_id_check = get_practice_id_from_name(client, header, TEBRA_PRACTICE_NAME)
                 if not practice_id_check: st.stop()
             display_message("success", f"✅ Connected to Tebra. Practice '{TEBRA_PRACTICE_NAME}' ID: {practice_id_check}.")
+            
             try:
-                df_excel = pd.read_excel(uploaded_file_val)
-                df_excel.columns = df_excel.columns.str.strip()
-                # Add original_excel_row_num for better error reporting context
-                df_excel['original_excel_row_num'] = range(st.session_state.original_excel_row_num, st.session_state.original_excel_row_num + len(df_excel))
+                df_excel_input = pd.read_excel(uploaded_file_val, dtype=str) 
+                df_excel_input.columns = df_excel_input.columns.str.strip()
+                # Add 'original_excel_row_num' for internal use, will be dropped before final Excel output
+                df_excel_input['original_excel_row_num'] = range(st.session_state.original_excel_row_num_start, st.session_state.original_excel_row_num_start + len(df_excel_input))
 
-                missing_cols = [c for c in EXPECTED_COLUMNS if c not in df_excel.columns]
-                if missing_cols: display_message("error", f"❌ Excel missing columns: {', '.join(missing_cols)}."); st.stop()
-                display_message("info", "Excel loaded. Processing charges...")
-                output_data = process_excel_data(client, header, practice_id_check, df_excel)
-                if output_data:
-                    df_results = pd.DataFrame(output_data)
+                # Validate input columns based on EXPECTED_COLUMNS (original app's list)
+                actual_cols = df_excel_input.columns.tolist()
+                missing_cols = [c for c in EXPECTED_COLUMNS if c not in actual_cols]
+                if missing_cols: 
+                    display_message("error", f"❌ Excel file is missing the following required columns from the expected template: {', '.join(missing_cols)}.")
+                    st.stop()
+                
+                display_message("info", f"Excel loaded ({len(df_excel_input)} rows). Processing charges...")
+                output_df_results, success_groups_count, fail_groups_count = process_excel_data(client, header, practice_id_check, df_excel_input)
+                
+                if output_df_results is not None and not output_df_results.empty:
                     st.subheader("Processing Results Summary")
-                    total_rows = len(df_results)
-                    success_rows = len(df_results[df_results['Charge Entry Status'] == 'Done'])
-                    failed_rows = total_rows - success_rows
-                    st.metric("Total Rows Processed", total_rows)
+                    total_input_rows = len(df_excel_input) 
+                    
+                    st.metric("Total Input Excel Rows", total_input_rows) 
                     col1, col2 = st.columns(2)
-                    col1.metric("Rows Successful", success_rows)
-                    col2.metric("Rows Failed", failed_rows)
-                    st.subheader("Detailed Results"); st.dataframe(df_results)
+                    col1.metric("Encounter Groups Successfully Processed", success_groups_count) 
+                    col2.metric("Encounter Groups Failed", fail_groups_count)
+
+                    st.subheader("Detailed Results")
+                    # Display the DataFrame with the new column name and simplified errors
+                    st.dataframe(output_df_results) 
+                    
+                    # Prepare DataFrame for download (it should already have the correct columns from process_excel_data)
+                    df_for_download = output_df_results.copy()
+                    # Explicitly drop 'original_excel_row_num' if it's still there before download
+                    if 'original_excel_row_num' in df_for_download.columns:
+                        df_for_download = df_for_download.drop(columns=['original_excel_row_num'])
+
+
                     output_excel_io = io.BytesIO()
                     with pd.ExcelWriter(output_excel_io, engine='xlsxwriter') as writer:
-                        df_results.to_excel(writer, index=False, sheet_name='ChargeEntryResults')
+                        df_for_download.to_excel(writer, index=False, sheet_name='ChargeEntryResults')
                     excel_bytes = output_excel_io.getvalue()
                     st.download_button(label="📥 Download Results Excel", data=excel_bytes,
                                        file_name=f"Tebra_Results_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                       key="sb_download_excel_button")
-                else: display_message("info", "ℹ️ No results data generated.")
+                                       key="sb_download_excel_v5") 
+                else: display_message("info", "ℹ️ No results data generated from processing.")
             except Exception as e:
-                display_message("error", f"❌ An unexpected error occurred: {e}")
-                st.exception(e)
+                display_message("error", f"❌ An unexpected error occurred during Excel processing or API interaction: {e}")
+                st.exception(e) 
+    
     st.markdown(f'<div class="footer">{APP_FOOTER}</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
