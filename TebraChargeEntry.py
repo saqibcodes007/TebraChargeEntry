@@ -486,7 +486,7 @@ def process_excel_data(client_obj, header_obj, current_practice_id, df_excel_dat
             if hasattr(api_resp, 'ErrorResponse') and api_resp.ErrorResponse and api_resp.ErrorResponse.IsError: grp_fail_reason = f"API Error: {api_resp.ErrorResponse.ErrorMessage}"
             elif hasattr(api_resp, 'SecurityResponse') and api_resp.SecurityResponse and not api_resp.SecurityResponse.Authorized: grp_fail_reason = f"Auth Error: {api_resp.SecurityResponse.SecurityResult}"
             elif hasattr(api_resp, 'EncounterID') and api_resp.EncounterID:
-                grp_status, grp_fail_reason = "Done", f"Success. EncounterID: {api_resp.EncounterID}"
+                grp_status, grp_fail_reason = "Done", f"{api_resp.EncounterID}"
                 log_ph.success(f"Grp (Pt {pid_for_api}, DOS {enc_src_dict[COL_FROM_DATE]}): SUCCESS! EncounterID: {api_resp.EncounterID}")
                 success_groups += 1
             else: grp_fail_reason = f"Unknown API resp: {zeep.helpers.serialize_object(api_resp,dict) if api_resp else 'None'}"
